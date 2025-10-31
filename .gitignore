@@ -1,0 +1,9 @@
+# Python Virtual Environment
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Secrets file (for API keys)
+.env
