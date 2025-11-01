@@ -7,3 +7,6 @@ __pycache__/
 
 # Secrets file (for API keys)
 .env
+
+# Data
+data/
