@@ -90,103 +90,154 @@ def fetch_all_members():
     print(f"Total members fetched: {len(all_members)}")
     return all_members
 
-# Load - Insert data into database
+# Load - Upsert data into database
 def load_members_to_db(members):
     """
-    Loads a list of member data into the 'politicians' table.
+    Performs an "UPSERT" on the politicians table.
+    - Inserts new politicians if they don't exist.
+    - Updates existing politicians with fresh data, active status, and full term history.
     - Correctly parses 'name' field with suffixes (e.g., "Last, First, Jr.")
     - Cleans chamber data ("House of Representatives" -> "House")
     - Transforms full state names to 2-letter abbreviations.
-    - Uses PostgreSQL-specific 'pg_insert' for 'ON CONFLICT'.
+    - Uses PostgreSQL-specific 'pg_insert' for 'ON CONFLICT...DO UPDATE'.
     """
-    print("Starting to load members into the database...")
+    print("Starting to load and update members in the database...") # Updated message
     
     with engine.connect() as conn:
         politicians_table = sqlalchemy.Table('politicians', sqlalchemy.MetaData(), autoload_with=engine)
         
-        with conn.begin() as transaction:
-            count = 0
-            inserted_count = 0
-            members_to_insert = []  # Batch insert
+        # Get the current year to determine 'is_active' status
+        current_year = 2025 
+            
+        members_to_upsert = [] # Renamed to reflect UPSERT
+        count = 0
 
-            for member in members:
-                try:
-                    congress_id = member.get('bioguideId')
-                    full_name_str = member.get('name')
+        for member in members:
+            try:
+                congress_id = member.get('bioguideId')
+                full_name_str = member.get('name')
 
-                    if not congress_id or not full_name_str:
-                        print(f"SKIPPING: Member with missing bioguideId or name.")
-                        continue
-                    
-                    # Parse name
-                    first_name = None
-                    last_name = None
-                    
-                    if ', ' in full_name_str:
-                        # Split only on the first comma.
-                        # "Anthony, Beryl, Jr." -> ['Anthony', 'Beryl, Jr.']
-                        parts = full_name_str.split(', ', 1) 
-                        last_name = parts[0].strip()
-                        first_name = parts[1].strip()
-                    else:
-                        # Failsafe for names with no comma (e.g., "Ronnie G. Flippo")
-                        last_name = full_name_str.strip()
-                    
-                    # Transform State name to abbreviation
-                    party = member.get('partyName')
-                    full_state_name = member.get('state')
-                    state_abbr = STATE_TO_ABBR_MAP.get(full_state_name) 
-                    
-                    if not state_abbr and full_state_name:
-                        print(f"Warning: No abbreviation for state: '{full_state_name}'. Skipping member {congress_id}.")
-                        continue 
-
-                    # Transform Chamber
-                    chamber = None
-                    raw_chamber = None
-                    terms_object = member.get('terms')
-                    
-                    if terms_object and isinstance(terms_object, dict):
-                        terms_list = terms_object.get('item')
-                        if terms_list and isinstance(terms_list, list) and len(terms_list) > 0:
-                            raw_chamber = terms_list[-1].get('chamber')
-                    
-                    if raw_chamber == "House of Representatives":
-                        chamber = "House"
-                    elif raw_chamber == "Senate":
-                        chamber = "Senate"
-
-                    # Add to batch
-                    insert_data = {
-                        "congress_id": congress_id,
-                        "first_name": first_name, 
-                        "last_name": last_name,
-                        "party": party,
-                        "state": state_abbr, 
-                        "chamber": chamber
-                    }
-                    members_to_insert.append(insert_data)
-                    count += 1
+                if not congress_id or not full_name_str:
+                    print(f"SKIPPING: Member with missing bioguideId or name.")
+                    continue
                 
-                except Exception as e:
-                    print(f"CRITICAL ERROR processing {member.get('bioguideId')}: {e}")
+                # Parse name (Your existing logic)
+                first_name = None
+                last_name = None
+                
+                if ', ' in full_name_str:
+                    # Split only on the first comma.
+                    # "Anthony, Beryl, Jr." -> ['Anthony', 'Beryl, Jr.']
+                    parts = full_name_str.split(', ', 1) 
+                    last_name = parts[0].strip()
+                    first_name = parts[1].strip()
+                else:
+                    # Failsafe for names with no comma (e.g., "Ronnie G. Flippo")
+                    last_name = full_name_str.strip()
+                
+                # Transform State name to abbreviation (Your existing logic)
+                party = member.get('partyName')
+                full_state_name = member.get('state')
+                state_abbr = STATE_TO_ABBR_MAP.get(full_state_name) 
+                
+                if not state_abbr and full_state_name:
+                    print(f"Warning: No abbreviation for state: '{full_state_name}'. Skipping member {congress_id}.")
+                    continue 
 
-            # Load - Execute Batch insert
-            if members_to_insert:
-                try:
-                    stmt = pg_insert(politicians_table).on_conflict_do_nothing(
-                        index_elements=['congress_id']
+                # --- NEW: Transform Chamber, Term Dates, and Active Status ---
+                chamber = None
+                all_start_years = []
+                all_end_years = []
+                is_active = False
+
+                terms_object = member.get('terms')
+                if terms_object and isinstance(terms_object, dict):
+                    terms_list = terms_object.get('item')
+                    if terms_list and isinstance(terms_list, list) and len(terms_list) > 0:
+                        
+                        # Loop through all terms (e.g., House, then Senate)
+                        for term in terms_list:
+                            # Handle inconsistent keys ('start' vs 'startYear')
+                            start = term.get('startYear') or term.get('start')
+                            if start:
+                                all_start_years.append(int(start))
+                            
+                            # Handle inconsistent keys ('end' vs 'endYear')
+                            end = term.get('endYear') or term.get('end')
+                            if end:
+                                all_end_years.append(int(end))
+                            elif end is None: # Actively serving in this term
+                                is_active = True
+
+                        # Use the *latest* term for their current/last chamber
+                        latest_term = terms_list[-1]
+                        raw_chamber = latest_term.get('chamber')
+                        if raw_chamber == "House of Representatives":
+                            chamber = "House"
+                        elif raw_chamber == "Senate":
+                            chamber = "Senate"
+
+                # Calculate final start and end years
+                final_start_year = min(all_start_years) if all_start_years else None
+                final_end_year = None
+                
+                if not is_active and all_end_years:
+                    # If they are retired, their end year is the latest one
+                    final_end_year = max(all_end_years)
+                # If is_active, final_end_year correctly stays None (NULL)
+                # --- END NEW LOGIC ---
+
+                # Add to batch
+                insert_data = {
+                    "congress_id": congress_id,
+                    "first_name": first_name, 
+                    "last_name": last_name,
+                    "party": party,
+                    "state": state_abbr, 
+                    "chamber": chamber,
+                    "is_active": is_active,           # Your new column
+                    "start_year": final_start_year,   # Your new column
+                    "end_year": final_end_year        # Your new column
+                }
+                members_to_upsert.append(insert_data)
+                count += 1
+            
+            except Exception as e:
+                print(f"CRITICAL ERROR processing {member.get('bioguideId')}: {e}")
+
+        # Load - Execute Batch Upsert
+        if members_to_upsert:
+            print(f"Updating {len(members_to_upsert)} records in the database...")
+            try:
+                # We must wrap this in its own transaction
+                with conn.begin() as transaction:
+                    stmt = pg_insert(politicians_table).values(members_to_upsert)
+                    
+                    # Update logic for conflicts
+                    update_stmt = stmt.on_conflict_do_update(
+                        index_elements=['congress_id'], # The column that causes the conflict
+                        # The columns to UPDATE if a conflict occurs
+                        set_={
+                            'first_name': stmt.excluded.first_name,
+                            'last_name': stmt.excluded.last_name,
+                            'party': stmt.excluded.party,
+                            'state': stmt.excluded.state,
+                            'chamber': stmt.excluded.chamber,
+                            'is_active': stmt.excluded.is_active,
+                            'start_year': stmt.excluded.start_year,
+                            'end_year': stmt.excluded.end_year
+                        }
                     )
-                    result = conn.execute(stmt, members_to_insert)
-                    inserted_count = result.rowcount
+                    
+                    conn.execute(update_stmt)
 
-                except Exception as e:
-                    print(f"\n    DATABASE ERROR    ")
-                    print(f"A critical database error occurred: {e}")
-                    print("                         \n")
-                    raise e 
+            except Exception as e:
+                print(f"\n   DATABASE ERROR   ")
+                print(f"A critical database error occurred: {e}")
+                print("                    \n")
+                raise e 
 
-            print(f"Processed {count} members. Successfully inserted {inserted_count} new members.")
+            print(f"Processed and updated {count} members.") # Updated message
 
 if __name__ == "__main__":
     # Extract
